@@ -25,10 +25,34 @@ $result = New-Object psobject @{
     changed = $false
 };
 
-$win32_os = Get-CimInstance Win32_OperatingSystem
-$win32_cs = Get-CimInstance Win32_ComputerSystem
+$psversion = $PSVersionTable.PSVersion.Major
+
+if ($psversion -gt 2) {
+    $win32_os = Get-CimInstance Win32_OperatingSystem
+    $win32_cs = Get-CimInstance Win32_ComputerSystem
+    $osArch = $win32_os.OSArchitecture
+    $boottime = $win32_os.lastbootuptime.ToString("u")
+    $osname = ($win32_os.Name.Split('|')[0]).Trim()
+    $capacity = $win32_cs.TotalPhysicalMemory # Win32_PhysicalMemory is empty on some virtual platforms
+    $uptime = $([System.Convert]::ToInt64($(Get-Date).Subtract($win32_os.lastbootuptime).TotalSeconds))
+}
+else {
+    $procarch = (get-wmiObject Win32_Processor) | select AddressWidth | % {$_.addresswidth}
+    if ($procarch -is [system.array]) {
+        $osArch = $procarch[0].toString() + "-bit"
+    }
+    else {
+        $osArch = $procarch.toString() + "-bit"
+    }
+    $bt = Get-WmiObject win32_operatingsystem | select csname, @{LABEL="LastBootUpTime" ;EXPRESSION={$_.ConverttoDateTime($_.lastbootuptime)}}
+    $boottime = $bt.lastbootuptime.toString()
+    $osname = get-wmiobject win32_operatingsystem | % {$_.caption} | % {$_.Split('|')[0].Trim()}
+    $capacity = (get-wmiObject Win32_ComputerSystem).TotalPhysicalMemory.toString()
+    $uptime = $([System.Convert]::ToInt64($(Get-Date).Subtract($bt.lastbootuptime).TotalSeconds)).toString()
+}
+
 $osversion = [Environment]::OSVersion
-$capacity = $win32_cs.TotalPhysicalMemory # Win32_PhysicalMemory is empty on some virtual platforms
+
 $netcfg = Get-WmiObject win32_NetworkAdapterConfiguration
 
 $ActiveNetcfg = @(); $ActiveNetcfg+= $netcfg | where {$_.ipaddress -ne $null}
@@ -39,7 +63,7 @@ foreach ($adapter in $ActiveNetcfg)
     interface_name = $adapter.description
     dns_domain = $adapter.dnsdomain
     default_gateway = $null
-    interface_index = $adapter.InterfaceIndex
+    interface_index = $adapter.Index
     }
     
     if ($adapter.defaultIPGateway)
@@ -52,13 +76,13 @@ foreach ($adapter in $ActiveNetcfg)
 
 Set-Attr $result.ansible_facts "ansible_interfaces" $formattednetcfg
 
-Set-Attr $result.ansible_facts "ansible_architecture" $win32_os.OSArchitecture 
+Set-Attr $result.ansible_facts "ansible_architecture" $osArch 
 
 Set-Attr $result.ansible_facts "ansible_hostname" $env:COMPUTERNAME;
 Set-Attr $result.ansible_facts "ansible_fqdn" "$([System.Net.Dns]::GetHostByName((hostname)).HostName)"
 Set-Attr $result.ansible_facts "ansible_system" $osversion.Platform.ToString()
 Set-Attr $result.ansible_facts "ansible_os_family" "Windows"
-Set-Attr $result.ansible_facts "ansible_os_name" ($win32_os.Name.Split('|')[0]).Trim()
+Set-Attr $result.ansible_facts "ansible_os_name" $osname
 Set-Attr $result.ansible_facts "ansible_distribution" $osversion.VersionString
 Set-Attr $result.ansible_facts "ansible_distribution_version" $osversion.Version.ToString()
 
@@ -74,46 +98,52 @@ Set-Attr $result.ansible_facts "ansible_date_time" $date
 
 Set-Attr $result.ansible_facts "ansible_totalmem" $capacity
 
-Set-Attr $result.ansible_facts "ansible_lastboot" $win32_os.lastbootuptime.ToString("u")
-Set-Attr $result.ansible_facts "ansible_uptime_seconds" $([System.Convert]::ToInt64($(Get-Date).Subtract($win32_os.lastbootuptime).TotalSeconds))
+Set-Attr $result.ansible_facts "ansible_lastboot" $boottime
+Set-Attr $result.ansible_facts "ansible_uptime_seconds" $uptime
 
 $ips = @()
-Foreach ($ip in $netcfg.IPAddress) { If ($ip) { $ips += $ip } }
-Set-Attr $result.ansible_facts "ansible_ip_addresses" $ips
+if ($psversion -gt2 ) {
+   Foreach ($ip in $netcfg.IPAddress) { If ($ip) { $ips += $ip } }
+}
+else {
+   $ipaddrs = $netcfg |select IPAddress
+   Foreach ($ip in $ipaddrs) {if ($ip.IPAddress) { $ips += $ip } }
+}
 
-$psversion = $PSVersionTable.PSVersion.Major
+Set-Attr $result.ansible_facts "ansible_ip_addresses" $ips
 Set-Attr $result.ansible_facts "ansible_powershell_version" $psversion
 
-$winrm_https_listener_parent_path = Get-ChildItem -Path WSMan:\localhost\Listener -Recurse | Where-Object {$_.PSChildName -eq "Transport" -and $_.Value -eq "HTTPS"} | select PSParentPath
-$winrm_https_listener_path = $null
-$https_listener = $null
-$winrm_cert_thumbprint = $null
-$uppercase_cert_thumbprint = $null
+if ($psversion -gt 2) {
+    $winrm_https_listener_parent_path = Get-ChildItem -Path WSMan:\localhost\Listener -Recurse | Where-Object {$_.PSChildName -eq "Transport" -and $_.Value -eq "HTTPS"} | select PSParentPath
+    $winrm_https_listener_path = $null
+    $https_listener = $null
+    $winrm_cert_thumbprint = $null
+    $uppercase_cert_thumbprint = $null
 
-if ($winrm_https_listener_parent_path ) {
-    $winrm_https_listener_path = $winrm_https_listener_parent_path.PSParentPath.Substring($winrm_https_listener_parent_path.PSParentPath.LastIndexOf("\"))
+    if ($winrm_https_listener_parent_path ) {
+        $winrm_https_listener_path = $winrm_https_listener_parent_path.PSParentPath.Substring($winrm_https_listener_parent_path.PSParentPath.LastIndexOf("\"))
+    }
+
+    if ($winrm_https_listener_path)
+    {
+        $https_listener = Get-ChildItem -Path "WSMan:\localhost\Listener$winrm_https_listener_path"
+    }
+
+    if ($https_listener)
+    {
+        $winrm_cert_thumbprint = $https_listener | where {$_.Name -EQ "CertificateThumbprint" } | select Value
+    }
+
+    if ($winrm_cert_thumbprint)
+    {
+        $uppercase_cert_thumbprint = $winrm_cert_thumbprint.Value.ToString().ToUpper()
+    }
+
+    $winrm_cert_expiry = Get-ChildItem -Path Cert:\LocalMachine\My | where Thumbprint -EQ $uppercase_cert_thumbprint | select NotAfter
+
+    if ($winrm_cert_expiry) 
+    {
+        Set-Attr $result.ansible_facts "ansible_winrm_certificate_expires" $winrm_cert_expiry.NotAfter.ToString("yyyy-MM-dd HH:mm:ss")
+    }
 }
-
-if ($winrm_https_listener_path)
-{
-    $https_listener = Get-ChildItem -Path "WSMan:\localhost\Listener$winrm_https_listener_path"
-}
-
-if ($https_listener)
-{
-    $winrm_cert_thumbprint = $https_listener | where {$_.Name -EQ "CertificateThumbprint" } | select Value
-}
-
-if ($winrm_cert_thumbprint)
-{
-   $uppercase_cert_thumbprint = $winrm_cert_thumbprint.Value.ToString().ToUpper()
-}
-
-$winrm_cert_expiry = Get-ChildItem -Path Cert:\LocalMachine\My | where Thumbprint -EQ $uppercase_cert_thumbprint | select NotAfter
-
-if ($winrm_cert_expiry) 
-{
-    Set-Attr $result.ansible_facts "ansible_winrm_certificate_expires" $winrm_cert_expiry.NotAfter.ToString("yyyy-MM-dd HH:mm:ss")
-}
-
 Exit-Json $result;
