@@ -99,6 +99,6 @@ Else
 # generate return values
 
 $info = Get-Item $dest
-$result.size = $info.Length
+$result.size = $info.Length.toString()
 
 Exit-Json $result

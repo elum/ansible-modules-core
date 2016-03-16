@@ -50,7 +50,7 @@ If (Test-Path $path)
     Else
     {
         Set-Attr $result.stat "isdir" $FALSE;
-        Set-Attr $result.stat "size" $info.Length;
+        Set-Attr $result.stat "size" $info.Length.toString();
     }
     Set-Attr $result.stat "extension" $info.Extension;
     Set-Attr $result.stat "attributes" $info.Attributes.ToString();
